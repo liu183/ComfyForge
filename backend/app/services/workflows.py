@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import random
 import re
 from typing import Any, Optional
 
@@ -363,6 +364,11 @@ def fill_workflow(
     for p in template.get("params", []):
         if p["name"] not in actual and p.get("default") is not None:
             actual[p["name"]] = p["default"]
+
+    # 主流语义：seed 为负数（如 -1）表示随机
+    seed_val = actual.get("seed")
+    if isinstance(seed_val, (int, float)) and seed_val < 0:
+        actual["seed"] = random.randint(0, 2**31 - 1)
 
     # 上传的图片：模板中的 $image 用真实文件名
     if image_filename:

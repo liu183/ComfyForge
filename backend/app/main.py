@@ -121,6 +121,11 @@ def create_app() -> FastAPI:
     app.include_router(tasks.router, prefix=prefix)
     app.include_router(assets.router, prefix=prefix)
 
+    # 主流兼容 API（OpenAI Images / 主流视频生成 content[] 风格），挂载在 /v1
+    from .routers import compat
+
+    app.include_router(compat.router, prefix="/v1")
+
     @app.get("/")
     async def root():
         return {

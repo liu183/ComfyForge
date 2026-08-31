@@ -100,6 +100,7 @@ npm run dev
 | GET | `/api/v1/tasks/{id}` | 任务详情（含状态与结果资产） |
 | GET | `/api/v1/assets/proxy` | ComfyUI 产物代理 |
 | GET | `/api/v1/assets/mock/{file}` | Mock 产物 |
+| POST/GET | `/v1/*` | 主流兼容 API（OpenAI Images / 视频 content[] 风格），见下文「主流兼容 API」 |
 
 ### 创建任务：四种调用方式
 
@@ -208,7 +209,65 @@ python scripts/client_demo.py 图生视频   # 需要输入起始图路径
 | 文生视频 | `txt2video` | prompt | `{"prompt": "...", "width": 640, "height": 352, "length": 48, "steps": 4, "fps": 24}` |
 | 图生视频 | `img2video` | image, prompt | `{"prompt": "...", "video_frames": 36}` + 图片文件 |
 
-## 配置（backend/.env）
+## 主流兼容 API（消费侧零改动对接）
+
+除原生 `/api/v1/tasks` 外，网关额外暴露一组**行业主流协议**接口，已按 OpenAI Images、MiniMax H3 / 火山 Seedance / Runway 的参数语义设计，消费侧（前端、Agent、SDK）改 `base_url` 即可对接：
+
+```
+# 图片 · OpenAI 风格（同步返回）
+POST /v1/images/generations        {"model","prompt","size":"512x512","quality","response_format":"url|b64_json","n":1}
+POST /v1/images/edits              multipart: image + prompt + size（图生图）
+
+# 视频 · 主流异步三步式（content[] 多模态数组）
+POST /v1/videos/generations        {"model":"MiniMax-H3","content":[{...}],"duration"/"frames","ratio","resolution","seed"}
+GET  /v1/videos/generations/{id}   {"id","status":"succeeded","content":{"url":...}}
+
+# OpenAI 风格模型列表
+GET  /v1/models
+```
+
+**参数归一**（消费侧传主流参数，网关自动转内部模板参数）：
+
+| 主流参数 | 内部映射 | 说明 |
+|---|---|---|
+| `size: "512x512"` / `"auto"` | width/height | 解析 `WxH`，`auto`→1024x1024 |
+| `ratio: "16:9" \| "1:1" \| "9:16" \| "4:3" \| "3:4"` | width/height | 自动换算为 H3 32 对齐尺寸 |
+| `duration`（秒）/ `frames` | length / video_frames | `frames = duration × 24`，缺省 124 |
+| `content[].type=image_url` + `role=first_frame` | img2video 首帧 | 图文混合自动选图生视频 |
+| `seed: -1`（负数） | 随机种子 | 任意接口传负 seed 均随机（已全局统一） |
+| `response_format: "b64_json"` | base64 返回 | 支持 url / b64_json 两种返回 |
+
+**零改动对接示例**（OpenAI SDK）：
+
+```python
+from openai import OpenAI
+client = OpenAI(base_url="http://127.0.0.1:8000/v1", api_key="any")
+resp = client.images.generate(model="gpt-image-1", prompt="a cyberpunk city at night", size="512x512")
+print(resp.data[0].url)   # 直接可用的产物地址
+```
+
+**Python 消费示例**（content[] 视频，适配 MiniMax/Seedance 风格）：
+
+```python
+import requests, time
+BASE = "http://127.0.0.1:8000/v1"
+r = requests.post(f"{BASE}/videos/generations", json={
+    "model": "MiniMax-H3",
+    "content": [
+        {"type": "text", "text": "竹林晨雾，风吹竹叶轻轻摇曳"},
+        {"type": "image_url", "image_url": {"url": "https://.../frame.png"}, "role": "first_frame"},
+    ],
+    "duration": 5, "ratio": "16:9",
+})
+task_id = r.json()["task_id"]
+while True:
+    s = requests.get(f"{BASE}/videos/generations/{task_id}").json()
+    if s["status"] in ("succeeded", "failed"):
+        print(s.get("content", s.get("error"))); break
+    time.sleep(3)
+```
+
+> 说明：MVP 未做 Bearer 鉴权（本地服务），`api_key` 传任意值即可；生产部署建议在网关注入 API Key 校验。
 
 | 变量 | 说明 |
 |---|---|
