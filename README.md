@@ -101,9 +101,16 @@ npm run dev
 | GET | `/api/v1/assets/proxy` | ComfyUI 产物代理 |
 | GET | `/api/v1/assets/mock/{file}` | Mock 产物 |
 
-### 创建任务（文生图）
+### 创建任务：四种调用方式
+
+四种能力（文生图 / 图生图 / 文生视频 / 图生视频）共用一套 API，以下是四种调用方式，任选其一即可。
+
+#### 方式一 · HTTP JSON 直调（curl）
+
+最通用的方式，适合文生图 / 文生视频（无需图片）：
 
 ```bash
+# 文生图
 curl -X POST http://127.0.0.1:8000/api/v1/tasks \
   -H "Content-Type: application/json" \
   -d '{
@@ -114,20 +121,58 @@ curl -X POST http://127.0.0.1:8000/api/v1/tasks \
       "width": 512, "height": 512, "steps": 16, "seed": 42
     }
   }'
+
+# 文生视频（MiniMax H3，含音频）
+curl -X POST http://127.0.0.1:8000/api/v1/tasks \
+  -H "Content-Type: application/json" \
+  -d '{
+    "type": "txt2video",
+    "params": {
+      "prompt": "a white dog running in a cherry blossom park, petals swirling, birds chirping",
+      "width": 640, "height": 352, "length": 48, "steps": 4, "fps": 24, "seed": 7
+    }
+  }'
 ```
 
-返回 `{id, status, backend}`，随后轮询 `GET /api/v1/tasks/{id}` 直到 `status=succeeded`，从 `result.assets[].url` 取产物。
+#### 方式二 · HTTP multipart 上传（curl -F）
 
-### Agent 消费示例
+带参考图的能力（图生图 / 图生视频）用 multipart 提交图片 + 参数：
+
+```bash
+# 图生图
+curl -X POST http://127.0.0.1:8000/api/v1/tasks/upload \
+  -F "type=img2img" \
+  -F "prompt=make it a cyberpunk neon night city, vibrant" \
+  -F "denoise=0.6" \
+  -F "image=@D:\photo.png"
+
+# 图生视频（H3 首帧动起来）
+curl -X POST http://127.0.0.1:8000/api/v1/tasks/upload \
+  -F "type=img2video" \
+  -F "prompt=the fox slowly turns its head and blinks, gentle camera zoom" \
+  -F "video_frames=36" \
+  -F "image=@D:\fox.png"
+```
+
+#### 方式三 · Python Agent（requests + 轮询）
+
+任何 Agent / 脚本都能这样调用，封装好 `generate()` 即可复用：
 
 ```python
-# scripts/client_demo.py —— 任何 Agent/脚本都能这样调用
 import requests, time
 
 BASE = "http://127.0.0.1:8000/api/v1"
 
-def generate(task_type, params):
-    r = requests.post(f"{BASE}/tasks", json={"type": task_type, "params": params})
+def generate(task_type, params, image_path=None):
+    """创建任务并轮询到终态；image_path 用于图生图/图生视频。"""
+    if image_path:
+        with open(image_path, "rb") as f:
+            files = {"image": (image_path.split("/")[-1], f)}
+            r = requests.post(f"{BASE}/tasks/upload",
+                              data={"type": task_type, **{k: str(v) for k, v in params.items()}},
+                              files=files)
+    else:
+        r = requests.post(f"{BASE}/tasks", json={"type": task_type, "params": params})
     task = r.json()
     print("已创建:", task["id"], "| 后端:", task["backend"])
     while True:
@@ -136,10 +181,32 @@ def generate(task_type, params):
             return t
         time.sleep(2)
 
+# 文生图
 task = generate("txt2img", {"prompt": "a cute fox in autumn forest", "width": 512, "height": 512})
-print("完成:", task["status"])
 print("产物:", [a["url"] for a in task["result"]["assets"]])
 ```
+
+#### 方式四 · 命令行演示脚本
+
+仓库自带 `scripts/client_demo.py`，一条命令演示一种能力：
+
+```bash
+python scripts/client_demo.py 文生图     # 文生图
+python scripts/client_demo.py 文生视频   # 文生视频
+python scripts/client_demo.py 图生图     # 需要输入参考图路径
+python scripts/client_demo.py 图生视频   # 需要输入起始图路径
+```
+
+四种方式返回结构一致：`{id, status, backend}`，轮询 `GET /api/v1/tasks/{id}` 直到 `status=succeeded`，从 `result.assets[].url` 取产物（图片或视频）。
+
+### 四种能力请求一览（JSON Body）
+
+| 能力 | type | 必填参数 | 示例 |
+|---|---|---|---|
+| 文生图 | `txt2img` | prompt, model | `{"prompt": "...", "model": "AWPainting 1.4\\AWPainting_v1.4.safetensors", "width": 512, "height": 512, "steps": 16}` |
+| 图生图 | `img2img` | image, prompt | `{"prompt": "...", "denoise": 0.6}` + 图片文件 |
+| 文生视频 | `txt2video` | prompt | `{"prompt": "...", "width": 640, "height": 352, "length": 48, "steps": 4, "fps": 24}` |
+| 图生视频 | `img2video` | image, prompt | `{"prompt": "...", "video_frames": 36}` + 图片文件 |
 
 ## 配置（backend/.env）
 
