@@ -43,6 +43,68 @@ _RATIO_SIZE = {
     "3:2": (512, 384),
 }
 
+# quality 档位 -> 采样步数
+_QUALITY_STEPS = {"low": 12, "medium": 20, "high": 28}
+
+# 风格预设 -> (模型, 风格词, 采样器, CFG)
+# 模型名取自本机真实健康 checkpoint，风格词注入到提示词末尾
+_STYLE_PRESETS: dict[str, dict[str, Any]] = {
+    "auto": {
+        "model": DEFAULT_IMAGE_MODEL,
+        "words": "",
+        "sampler": "dpmpp_2m", "cfg": 7.0,
+    },
+    "photorealistic": {
+        "model": "majicMIX realistic 逼真风格\\majicmixRealistic_v4.safetensors",
+        "words": "photorealistic, 8k uhd, highly detailed skin texture, natural skin pores, "
+                "85mm lens, soft studio lighting, sharp focus, professional photography",
+        "sampler": "dpmpp_2m", "cfg": 7.0,
+    },
+    "cinematic": {
+        "model": "majicMIX realistic 逼真风格\\majicmixRealistic_v4.safetensors",
+        "words": "cinematic lighting, dramatic atmosphere, film grain, anamorphic lens, "
+                "high contrast, shallow depth of field",
+        "sampler": "dpmpp_2m", "cfg": 7.5,
+    },
+    "anime": {
+        "model": "AWPainting 1.4\\AWPainting_v1.4.safetensors",
+        "words": "anime style, cel shading, clean lineart, vibrant colors, "
+                "high quality anime illustration",
+        "sampler": "euler", "cfg": 7.0,
+    },
+    "watercolor": {
+        "model": DEFAULT_IMAGE_MODEL,
+        "words": "watercolor painting, soft brush strokes, paper texture, delicate washes, "
+                "artistic, gentle colors",
+        "sampler": "dpmpp_2m", "cfg": 7.0,
+    },
+    "ink": {
+        "model": "墨幽\\MoyouArtificial_v10502g.safetensors",
+        "words": "chinese ink wash painting, sumi-e, minimalist, elegant brush strokes, "
+                "monochrome with subtle ink texture",
+        "sampler": "dpmpp_2m", "cfg": 6.5,
+    },
+    "3d": {
+        "model": DEFAULT_IMAGE_MODEL,
+        "words": "3d render, octane render, soft global illumination, subsurface scattering, "
+                "high quality 3d cg, clay render",
+        "sampler": "dpmpp_2m", "cfg": 7.0,
+    },
+    "fantasy": {
+        "model": "绪儿-红蓝幻想大模型\\绪儿-红蓝幻想大模型.safetensors",
+        "words": "fantasy concept art, epic composition, magical atmosphere, "
+                "intricate details, dynamic lighting",
+        "sampler": "euler", "cfg": 7.5,
+    },
+    "pastel": {
+        "model": "pastelMixStylizedAnime\\pastelMixStylizedAnime_pastelMixFull.safetensors",
+        "words": "pastel colors, soft gentle tones, kawaii, dreamy atmosphere, "
+                "smooth shading, cute",
+        "sampler": "euler", "cfg": 7.0,
+    },
+}
+_STYLE_ALIAS = {"realistic": "photorealistic"}
+
 
 # ---------------------------------------------------------------------------
 # 请求模型
@@ -152,6 +214,27 @@ def _resolve_image_model(st, requested: Optional[str], mtype: str = "checkpoints
     return DEFAULT_IMAGE_MODEL
 
 
+def _apply_style(
+    style: Optional[str], prompt: str, requested_model: Optional[str], st
+) -> tuple[str, str, str, float]:
+    """按风格预设解析出 (最终提示词, 模型, 采样器, CFG)。
+
+    显式 model 优先于风格预设模型；风格词追加到提示词末尾。
+    """
+    key = (style or "auto").strip().lower()
+    key = _STYLE_ALIAS.get(key, key)
+    preset = _STYLE_PRESETS.get(key)
+    if preset is None:
+        raise HTTPException(
+            400,
+            f"不支持的 style: {style}，可选: {', '.join(sorted(set(_STYLE_PRESETS) | set(_STYLE_ALIAS)))}",
+        )
+    model = _resolve_image_model(st, requested_model) if requested_model else preset["model"]
+    words = preset.get("words", "")
+    final = f"{prompt}, {words}" if words else prompt
+    return final, model, preset["sampler"], preset["cfg"]
+
+
 # ---------------------------------------------------------------------------
 # OpenAI Images 兼容（同步）
 # ---------------------------------------------------------------------------
@@ -164,14 +247,20 @@ async def images_generations(request: Request, body: ImageGenRequest):
     if body.n > 1:
         raise HTTPException(400, "当前版本仅支持 n=1")
 
+    final_prompt, model, sampler, cfg = _apply_style(
+        body.style, body.prompt, body.model, st
+    )
+    steps = _QUALITY_STEPS.get((body.quality or "high").lower(), 28)
     width, height = _parse_size(body.size)
     backend = _pick_backend(tpl, st)
     task = await st.task_manager.create("txt2img", {
-        "prompt": body.prompt,
-        "model": _resolve_image_model(st, body.model),
+        "prompt": final_prompt,
+        "model": model,
         "width": width,
         "height": height,
-        "steps": DEFAULT_STEPS,
+        "steps": steps,
+        "cfg": cfg,
+        "sampler": sampler,
         "seed": -1,
     }, backend)
     t = await _wait_task(st.task_manager, task.id)
@@ -180,7 +269,7 @@ async def images_generations(request: Request, body: ImageGenRequest):
 
     asset = t.result.assets[0]
     base = str(request.base_url).rstrip("/")
-    data: dict = {"revised_prompt": body.prompt}
+    data: dict = {"revised_prompt": final_prompt}
     if body.response_format == "b64_json":
         async with httpx.AsyncClient(timeout=30) as client:
             b64 = await client.get(base + asset.url)
@@ -196,6 +285,8 @@ async def images_edits(
     image: UploadFile = File(...),
     prompt: str = Form(...),
     model: Optional[str] = Form(None),
+    style: Optional[str] = Form(None),
+    quality: str = Form("high"),
     n: int = Form(1),
     size: str = Form("1024x1024"),
     response_format: str = Form("url"),
@@ -207,16 +298,22 @@ async def images_edits(
     if n > 1:
         raise HTTPException(400, "当前版本仅支持 n=1")
 
+    final_prompt, model, sampler, cfg = _apply_style(
+        style, prompt, model, st
+    )
+    steps = _QUALITY_STEPS.get((quality or "high").lower(), 28)
     content = await image.read()
     width, height = _parse_size(size)
     backend = _pick_backend(tpl, st)
     task = await st.task_manager.create("img2img", {
-        "prompt": prompt,
-        "model": _resolve_image_model(st, model),
+        "prompt": final_prompt,
+        "model": model,
         "width": width,
         "height": height,
         "denoise": 0.6,
-        "steps": DEFAULT_STEPS,
+        "steps": steps,
+        "cfg": cfg,
+        "sampler": sampler,
         "seed": -1,
     }, backend, image_bytes=content)
     t = await _wait_task(st.task_manager, task.id)
@@ -225,7 +322,7 @@ async def images_edits(
 
     asset = t.result.assets[0]
     base = str(request.base_url).rstrip("/")
-    data: dict = {"revised_prompt": prompt}
+    data: dict = {"revised_prompt": final_prompt}
     if response_format == "b64_json":
         async with httpx.AsyncClient(timeout=30) as client:
             b64 = await client.get(base + asset.url)

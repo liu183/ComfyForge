@@ -215,8 +215,8 @@ python scripts/client_demo.py 图生视频   # 需要输入起始图路径
 
 ```
 # 图片 · OpenAI 风格（同步返回）
-POST /v1/images/generations        {"model","prompt","size":"512x512","quality","response_format":"url|b64_json","n":1}
-POST /v1/images/edits              multipart: image + prompt + size（图生图）
+POST /v1/images/generations        {"model","prompt","style","size","quality","response_format":"url|b64_json","n":1}
+POST /v1/images/edits              multipart: image + prompt + style + size（图生图）
 
 # 视频 · 主流异步三步式（content[] 多模态数组）
 POST /v1/videos/generations        {"model":"MiniMax-H3","content":[{...}],"duration"/"frames","ratio","resolution","seed"}
@@ -227,6 +227,30 @@ GET  /v1/models                   生成主模型列表（data[] 含 capabilitie
 GET  /v1/models/discover          按类型 / 按能力分组，含节点来源与总数
 GET  /v1/models/{id}              单模型详情（模型 id 含反斜杠需 URL 编码）
 ```
+
+**风格切换（`style` 参数，OpenAI 同款语义）**：图片接口支持风格预设，自动切换模型 + 注入风格词 + 采样器/CFG：
+
+```python
+# 同一个 prompt，一个 style 参数切风格
+POST /v1/images/generations
+{"prompt": "a woman standing in a garden with flowers",
+ "style": "photorealistic", "size": "512x512"}
+```
+
+| style | 效果 | 自动使用的模型 |
+|---|---|---|
+| `photorealistic` / `realistic` | 写实人像摄影 | majicMIX realistic |
+| `anime` | 日系二次元 | AWPainting |
+| `cinematic` | 电影感光影 | majicMIX realistic |
+| `watercolor` | 水彩 | AWPainting |
+| `ink` | 水墨 / 浮世绘 | 墨幽 MoyouArtificial |
+| `3d` | 3D 渲染 | AWPainting |
+| `fantasy` | 幻想概念艺术 | 绪儿-红蓝幻想 |
+| `pastel` | 粉彩可爱 | pastelMixStylizedAnime |
+| `auto`（默认） | 通用 | AWPainting |
+
+> `quality` 控制采样步数：low→12 / medium→20 / high→28（默认）。显式传 `model` 可覆盖风格预设模型。
+
 
 **模型分层与健康**：
 - `role=main` 才是**生成主模型**（图片 checkpoint / 视频 diffusion），默认 `/v1/models` 只返回这些；VAE / 文本编码器 / LoRA 是 `role=component`，工作流自动使用，无需单独配置（`?role=all` 可查看）
