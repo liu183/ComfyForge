@@ -1,0 +1,26 @@
+# ---- Node ----
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+
+# ---- Python ----
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# ---- 本机配置（含密钥/路径，不入库）----
+backend/.env
+
+# ---- 运行时产物 ----
+backend/assets/
+*.log
+
+# ---- IDE / OS ----
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

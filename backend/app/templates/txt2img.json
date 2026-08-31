@@ -1,0 +1,44 @@
+{
+  "type": "txt2img",
+  "label": "文生图",
+  "description": "根据文字提示词生成一张图片",
+  "accepts_image": false,
+  "backend_order": ["comfy_local", "comfy_api"],
+  "params": [
+    {"name": "prompt", "label": "提示词", "type": "text", "required": true, "description": "描述你想生成的画面"},
+    {"name": "negative_prompt", "label": "负面提示词", "type": "text", "default": "lowres, bad anatomy, worst quality, blurry", "description": "不想出现的内容"},
+    {"name": "model", "label": "模型", "type": "select", "default": "", "options_source": {"loader": "CheckpointLoaderSimple", "field": "ckpt_name"}, "description": "checkpoint 大模型"},
+    {"name": "width", "label": "宽度", "type": "int", "default": 512, "min": 256, "max": 2048},
+    {"name": "height", "label": "高度", "type": "int", "default": 512, "min": 256, "max": 2048},
+    {"name": "steps", "label": "步数", "type": "int", "default": 20, "min": 1, "max": 60},
+    {"name": "cfg", "label": "CFG", "type": "float", "default": 7.0, "min": 1.0, "max": 20.0},
+    {"name": "sampler", "label": "采样器", "type": "select", "default": "euler", "options": ["euler", "euler_ancestral", "dpmpp_2m", "dpmpp_sde", "ddim", "uni_pc"]},
+    {"name": "seed", "label": "随机种子", "type": "int", "default": 0, "description": "-1 表示随机"},
+    {"name": "batch_size", "label": "生成数量", "type": "int", "default": 1, "min": 1, "max": 4}
+  ],
+  "backends": {
+    "comfy_local": {
+      "requires_nodes": ["CheckpointLoaderSimple", "CLIPTextEncode", "EmptyLatentImage", "KSampler", "VAEDecode", "SaveImage"],
+      "requires_models": [{"loader": "CheckpointLoaderSimple", "field": "ckpt_name"}],
+      "output_node": "9",
+      "output_kind": "image",
+      "workflow": {
+        "3": {"class_type": "KSampler", "inputs": {"seed": "$seed", "steps": "$steps", "cfg": "$cfg", "sampler_name": "$sampler", "scheduler": "normal", "denoise": 1.0, "model": ["4", 0], "positive": ["6", 0], "negative": ["7", 0], "latent_image": ["5", 0]}},
+        "4": {"class_type": "CheckpointLoaderSimple", "inputs": {"ckpt_name": "$model"}},
+        "5": {"class_type": "EmptyLatentImage", "inputs": {"width": "$width", "height": "$height", "batch_size": "$batch_size"}},
+        "6": {"class_type": "CLIPTextEncode", "inputs": {"text": "$prompt", "clip": ["4", 1]}},
+        "7": {"class_type": "CLIPTextEncode", "inputs": {"text": "$negative_prompt", "clip": ["4", 1]}},
+        "8": {"class_type": "VAEDecode", "inputs": {"samples": ["3", 0], "vae": ["4", 2]}},
+        "9": {"class_type": "SaveImage", "inputs": {"filename_prefix": "comfy-service/txt2img", "images": ["8", 0]}}
+      }
+    },
+    "comfy_api": {
+      "node_type": "WanTextToImageApi",
+      "requires_key": "wan_api_key",
+      "output_kind": "image",
+      "workflow": {
+        "1": {"class_type": "WanTextToImageApi", "inputs": {"model": "wan2.5-t2i-preview", "prompt": "$prompt", "negative_prompt": "$negative_prompt", "width": "$width", "height": "$height", "seed": "$seed"}}
+      }
+    }
+  }
+}

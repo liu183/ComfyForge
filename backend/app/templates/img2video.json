@@ -1,0 +1,75 @@
+{
+  "type": "img2video",
+  "label": "图生视频",
+  "description": "让一张参考图动起来，生成短视频（MiniMax H3，含原生音频）",
+  "accepts_image": true,
+  "backend_order": ["comfy_h3", "comfy_local", "comfy_api"],
+  "params": [
+    {"name": "image", "label": "起始图", "type": "image", "required": true, "description": "作为视频第一帧的图片"},
+    {"name": "prompt", "label": "提示词", "type": "text", "default": "", "description": "描述运动与画面（H3 建议给出镜头运动方向）"},
+    {"name": "width", "label": "宽度", "type": "int", "default": 640, "min": 128, "max": 2048, "description": "需为 32 的倍数"},
+    {"name": "height", "label": "高度", "type": "int", "default": 352, "min": 128, "max": 2048, "description": "需为 32 的倍数"},
+    {"name": "video_frames", "label": "帧数", "type": "int", "default": 124, "min": 4, "max": 200, "description": "总帧数（124 帧 ≈ 5 秒 @24fps）"},
+    {"name": "fps", "label": "帧率", "type": "int", "default": 24, "min": 1, "max": 30},
+    {"name": "steps", "label": "步数", "type": "int", "default": 4, "min": 1, "max": 60},
+    {"name": "cfg", "label": "CFG", "type": "float", "default": 2.5, "min": 1.0, "max": 12.0},
+    {"name": "seed", "label": "随机种子", "type": "int", "default": 0, "description": "-1 表示随机"}
+  ],
+  "backends": {
+    "comfy_local": {
+      "requires_nodes": ["ImageOnlyCheckpointLoader", "LoadImage", "SVD_img2vid_Conditioning", "VideoLinearCFGGuidance", "KSampler", "VAEDecode", "SaveVideo"],
+      "requires_models": [{"loader": "ImageOnlyCheckpointLoader", "field": "ckpt_name", "match": ["svd", "stable-video", "image_to_video", "i2v"]}],
+      "output_node": "9",
+      "output_kind": "video",
+      "note": "SVD 图生视频，需将 svd 系列模型放入 checkpoints 目录",
+      "workflow": {
+        "1": {"class_type": "ImageOnlyCheckpointLoader", "inputs": {"ckpt_name": "$model"}},
+        "2": {"class_type": "LoadImage", "inputs": {"image": "$image"}},
+        "3": {"class_type": "SVD_img2vid_Conditioning", "inputs": {"clip_vision": ["1", 1], "init_image": ["2", 0], "vae": ["1", 2], "width": "$width", "height": "$height", "video_frames": "$video_frames", "motion_bucket_id": "$motion_bucket_id", "fps": "$fps", "augmentation_level": 0.0}},
+        "4": {"class_type": "VideoLinearCFGGuidance", "inputs": {"model": ["1", 0], "min_cfg": 1.0, "max_cfg": "$cfg"}},
+        "5": {"class_type": "KSampler", "inputs": {"seed": "$seed", "steps": "$steps", "cfg": "$cfg", "sampler_name": "euler", "scheduler": "karras", "denoise": 1.0, "model": ["4", 0], "positive": ["3", 0], "negative": ["3", 1], "latent_image": ["3", 2]}},
+        "6": {"class_type": "VAEDecode", "inputs": {"samples": ["5", 0], "vae": ["1", 2]}},
+        "7": {"class_type": "SaveVideo", "inputs": {"video": ["6", 0], "filename_prefix": "comfy-service/img2video", "format": "auto", "codec": "h264"}}
+      }
+    },
+    "comfy_h3": {
+      "requires_nodes": ["UNETLoader", "VAELoader", "ClipProjLoader", "LoraLoaderModelOnly", "MiniMaxH3ImageToVideo", "MiniMaxH3SigmaShift", "BasicGuider", "BasicScheduler", "KSamplerSelect", "RandomNoise", "SamplerCustomAdvanced", "VAEDecode", "VAEDecodeAudio", "CreateVideo", "SaveVideo", "LoadImage"],
+      "requires_models": [
+        {"loader": "UNETLoader", "field": "unet_name", "match": ["minimax_h3"]},
+        {"loader": "ClipProjLoader", "field": "clip_name", "match": ["qwen3vl"]},
+        {"loader": "VAELoader", "field": "vae_name", "match": ["minimax_h3"]}
+      ],
+      "output_node": "15",
+      "output_kind": "video",
+      "note": "MiniMax H3-Lite 图生视频（W4A8 低显存路线，首帧参考图 + 原生音频）",
+      "workflow": {
+        "1": {"class_type": "ClipProjLoader", "inputs": {"mode": "dynamic", "projection": "mmh3-4b-ClipProj-celeb-mlp.safetensors", "device": "cuda:0", "clip_name": "qwen3vl_4b_int4_convrot.safetensors", "type": "krea2"}},
+        "2": {"class_type": "UNETLoader", "inputs": {"weight_dtype": "default", "unet_name": "minimax_h3_fl2va_pruned_w4a8_mixed_ax1y2jp.safetensors"}},
+        "3": {"class_type": "MiniMaxH3SigmaShift", "inputs": {"shift_video": 12.0, "shift_audio": 3.0, "model": ["2", 0]}},
+        "4": {"class_type": "VAELoader", "inputs": {"vae_name": "minimax_h3_video_vae_fp16.safetensors"}},
+        "5": {"class_type": "VAELoader", "inputs": {"vae_name": "minimax_h3_audio_vae_fp32.safetensors"}},
+        "6": {"class_type": "MiniMaxH3ImageToVideo", "inputs": {"clip": ["1", 0], "width": "$width", "prompt": "$prompt", "vae": ["4", 0], "length": "$video_frames", "height": "$height", "first_frame": ["20", 0]}},
+        "7": {"class_type": "BasicGuider", "inputs": {"model": ["105:201", 0], "conditioning": ["6", 0]}},
+        "8": {"class_type": "KSamplerSelect", "inputs": {"sampler_name": "res_multistep"}},
+        "9": {"class_type": "BasicScheduler", "inputs": {"scheduler": "simple", "model": ["105:201", 0], "steps": "$steps", "denoise": 1.0}},
+        "10": {"class_type": "RandomNoise", "inputs": {"noise_seed": "$seed"}},
+        "11": {"class_type": "SamplerCustomAdvanced", "inputs": {"sigmas": ["9", 0], "guider": ["7", 0], "noise": ["10", 0], "sampler": ["8", 0], "latent_image": ["6", 1]}},
+        "12": {"class_type": "VAEDecode", "inputs": {"samples": ["11", 0], "vae": ["4", 0]}},
+        "13": {"class_type": "VAEDecodeAudio", "inputs": {"samples": ["11", 0], "vae": ["5", 0]}},
+        "14": {"class_type": "CreateVideo", "inputs": {"images": ["12", 0], "audio": ["13", 0], "bit_depth": 8, "fps": "$fps"}},
+        "15": {"class_type": "SaveVideo", "inputs": {"video": ["14", 0], "filename_prefix": "comfy-service/img2video", "format": "auto", "codec": "auto"}},
+        "20": {"class_type": "LoadImage", "inputs": {"image": "$image"}},
+        "105:201": {"class_type": "LoraLoaderModelOnly", "inputs": {"strength_model": 1.0, "model": ["3", 0], "lora_name": "minimax_h3_fl2v_lightx2v_turbo_4step_v0.1_comfy_resized_avg_rank_21_bf16.safetensors"}}
+      }
+    },
+    "comfy_api": {
+      "node_type": "WanImageToVideoApi",
+      "requires_key": "wan_api_key",
+      "output_kind": "video",
+      "workflow": {
+        "1": {"class_type": "LoadImage", "inputs": {"image": "$image"}},
+        "2": {"class_type": "WanImageToVideoApi", "inputs": {"model": "wan2.6-i2v", "image": ["1", 0], "prompt": "$prompt", "size": "480p: 16:9 (832x480)", "duration": "5", "seed": "$seed"}}
+      }
+    }
+  }
+}

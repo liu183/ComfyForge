@@ -1,0 +1,46 @@
+{
+  "type": "img2img",
+  "label": "图生图",
+  "description": "基于上传的参考图 + 文字提示，生成新图片",
+  "accepts_image": true,
+  "backend_order": ["comfy_local", "comfy_api"],
+  "params": [
+    {"name": "image", "label": "参考图", "type": "image", "required": true, "description": "作为生成基础的图片"},
+    {"name": "prompt", "label": "提示词", "type": "text", "required": true, "description": "描述你想要的改动方向"},
+    {"name": "negative_prompt", "label": "负面提示词", "type": "text", "default": "lowres, bad anatomy, worst quality, blurry", "description": "不想出现的内容"},
+    {"name": "model", "label": "模型", "type": "select", "default": "", "options_source": {"loader": "CheckpointLoaderSimple", "field": "ckpt_name"}, "description": "checkpoint 大模型"},
+    {"name": "denoise", "label": "重绘幅度", "type": "float", "default": 0.6, "min": 0.0, "max": 1.0, "description": "0=保持原图，1=完全重画"},
+    {"name": "width", "label": "宽度", "type": "int", "default": 512, "min": 256, "max": 2048},
+    {"name": "height", "label": "高度", "type": "int", "default": 512, "min": 256, "max": 2048},
+    {"name": "steps", "label": "步数", "type": "int", "default": 20, "min": 1, "max": 60},
+    {"name": "cfg", "label": "CFG", "type": "float", "default": 7.0, "min": 1.0, "max": 20.0},
+    {"name": "sampler", "label": "采样器", "type": "select", "default": "euler", "options": ["euler", "euler_ancestral", "dpmpp_2m", "dpmpp_sde", "ddim", "uni_pc"]},
+    {"name": "seed", "label": "随机种子", "type": "int", "default": 0, "description": "-1 表示随机"}
+  ],
+  "backends": {
+    "comfy_local": {
+      "requires_nodes": ["CheckpointLoaderSimple", "CLIPTextEncode", "LoadImage", "VAEEncode", "KSampler", "VAEDecode", "SaveImage"],
+      "requires_models": [{"loader": "CheckpointLoaderSimple", "field": "ckpt_name"}],
+      "output_node": "9",
+      "output_kind": "image",
+      "workflow": {
+        "3": {"class_type": "KSampler", "inputs": {"seed": "$seed", "steps": "$steps", "cfg": "$cfg", "sampler_name": "$sampler", "scheduler": "normal", "denoise": "$denoise", "model": ["4", 0], "positive": ["6", 0], "negative": ["7", 0], "latent_image": ["5", 0]}},
+        "4": {"class_type": "CheckpointLoaderSimple", "inputs": {"ckpt_name": "$model"}},
+        "5": {"class_type": "VAEEncode", "inputs": {"pixels": ["2", 0], "vae": ["4", 2]}},
+        "6": {"class_type": "CLIPTextEncode", "inputs": {"text": "$prompt", "clip": ["4", 1]}},
+        "7": {"class_type": "CLIPTextEncode", "inputs": {"text": "$negative_prompt", "clip": ["4", 1]}},
+        "8": {"class_type": "VAEDecode", "inputs": {"samples": ["3", 0], "vae": ["4", 2]}},
+        "9": {"class_type": "SaveImage", "inputs": {"filename_prefix": "comfy-service/img2img", "images": ["8", 0]}},
+        "2": {"class_type": "LoadImage", "inputs": {"image": "$image"}}
+      }
+    },
+    "comfy_api": {
+      "node_type": "WanTextToImageApi",
+      "requires_key": "wan_api_key",
+      "output_kind": "image",
+      "workflow": {
+        "1": {"class_type": "WanTextToImageApi", "inputs": {"model": "wan2.5-t2i-preview", "prompt": "$prompt", "negative_prompt": "$negative_prompt", "width": "$width", "height": "$height", "seed": "$seed"}}
+      }
+    }
+  }
+}
