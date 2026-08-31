@@ -269,6 +269,82 @@ while True:
 
 > 说明：MVP 未做 Bearer 鉴权（本地服务），`api_key` 传任意值即可；生产部署建议在网关注入 API Key 校验。
 
+### 兼容接口 · 四种调用方式
+
+兼容接口同样覆盖四种能力，以下四种方式任选其一：
+
+#### 方式一 · HTTP JSON 直调（curl）
+
+```bash
+# 文生图（OpenAI 风格，同步返回）
+curl -X POST http://127.0.0.1:8000/v1/images/generations \
+  -H "Content-Type: application/json" \
+  -d '{"prompt": "a serene mountain lake at sunset, misty", "size": "512x512", "response_format": "url"}'
+
+# 文生视频（content[] 风格，异步三步式）
+curl -X POST http://127.0.0.1:8000/v1/videos/generations \
+  -H "Content-Type: application/json" \
+  -d '{"model": "MiniMax-H3", "content": [{"type": "text", "text": "a white dog running in a cherry blossom park"}], "duration": 5, "ratio": "16:9"}'
+```
+
+#### 方式二 · HTTP multipart / 图片输入（curl -F）
+
+```bash
+# 图生图（OpenAI 风格 /v1/images/edits，multipart）
+curl -X POST http://127.0.0.1:8000/v1/images/edits \
+  -F "prompt=turn it into a watercolor illustration" \
+  -F "size=512x512" \
+  -F "image=@D:\photo.png"
+
+# 图生视频（content[] 首帧；图片走 URL 或 base64 data URI）
+curl -X POST http://127.0.0.1:8000/v1/videos/generations \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "MiniMax-H3",
+    "content": [
+      {"type": "text", "text": "the fox slowly turns its head and blinks, gentle zoom"},
+      {"type": "image_url", "image_url": {"url": "data:image/png;base64,<BASE64>"}, "role": "first_frame"}
+    ],
+    "duration": 5, "ratio": "16:9"
+  }'
+```
+
+#### 方式三 · Python Agent（requests + 轮询）
+
+```python
+import requests, time
+
+BASE = "http://127.0.0.1:8000/v1"
+
+def generate_image(prompt, size="512x512"):
+    r = requests.post(f"{BASE}/images/generations", json={"prompt": prompt, "size": size}, timeout=180)
+    return r.json()["data"][0]["url"]           # 同步返回，直接拿地址
+
+def generate_video(content, duration=5):
+    r = requests.post(f"{BASE}/videos/generations",
+                      json={"model": "MiniMax-H3", "content": content, "duration": duration}, timeout=30)
+    tid = r.json()["task_id"]
+    while True:                                  # 异步轮询
+        s = requests.get(f"{BASE}/videos/generations/{tid}", timeout=10).json()
+        if s["status"] in ("succeeded", "failed"):
+            return s.get("content", s.get("error"))
+        time.sleep(3)
+
+print(generate_image("a cute robot astronaut, colorful nebula"))
+print(generate_video([{"type": "text", "text": "a whale swimming in deep blue ocean"}]))
+```
+
+#### 方式四 · 命令行演示脚本
+
+仓库自带 `scripts/compat_consumer.py`，一条命令演示一种能力（全走兼容接口）：
+
+```bash
+python scripts/compat_consumer.py txt2img              # 文生图
+python scripts/compat_consumer.py txt2video            # 文生视频
+python scripts/compat_consumer.py img2img D:\photo.png # 图生图（需参考图）
+python scripts/compat_consumer.py img2video D:\fox.png # 图生视频（需起始图）
+```
+
 | 变量 | 说明 |
 |---|---|
 | `COMFY_SERVERS` | ComfyUI 节点，多个用逗号分隔：`comfy_local=http://127.0.0.1:8189,comfy_h3=http://127.0.0.1:8189`（节点名需与模板 backend 名一致；本机合并后两个逻辑后端指向同一实例） |
