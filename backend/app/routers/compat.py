@@ -12,13 +12,16 @@ from __future__ import annotations
 import asyncio
 import base64
 import re
+import struct
 import time
+from pathlib import Path
 from typing import Any, Optional
 
 import httpx
 from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
 from pydantic import BaseModel, Field
 
+from ..config import settings
 from ..schemas import TaskOut
 from ..services.workflows import probe_capability
 
@@ -135,6 +138,20 @@ def _seed(seed: int) -> int:
     return seed if seed and seed >= 0 else 0
 
 
+def _resolve_image_model(st, requested: Optional[str], mtype: str = "checkpoints") -> str:
+    """校验并返回图片生成主模型。
+
+    requested 若为真实存在且健康（health=ok）的 checkpoint 则使用，否则回退默认底模。
+    """
+    if requested:
+        registry = _build_model_registry(st)
+        for e in registry:
+            if (e["role"] == "main" and e["type"] == mtype
+                    and e["id"] == requested and e["health"] == "ok"):
+                return requested
+    return DEFAULT_IMAGE_MODEL
+
+
 # ---------------------------------------------------------------------------
 # OpenAI Images 兼容（同步）
 # ---------------------------------------------------------------------------
@@ -151,7 +168,7 @@ async def images_generations(request: Request, body: ImageGenRequest):
     backend = _pick_backend(tpl, st)
     task = await st.task_manager.create("txt2img", {
         "prompt": body.prompt,
-        "model": DEFAULT_IMAGE_MODEL,
+        "model": _resolve_image_model(st, body.model),
         "width": width,
         "height": height,
         "steps": DEFAULT_STEPS,
@@ -195,7 +212,7 @@ async def images_edits(
     backend = _pick_backend(tpl, st)
     task = await st.task_manager.create("img2img", {
         "prompt": prompt,
-        "model": DEFAULT_IMAGE_MODEL,
+        "model": _resolve_image_model(st, model),
         "width": width,
         "height": height,
         "denoise": 0.6,
@@ -307,18 +324,20 @@ def videos_generation_status(task_id: str, request: Request):
 # ---------------------------------------------------------------------------
 # 模型发现（OpenAI 风格 + 详细分组）
 # ---------------------------------------------------------------------------
-# 模型类型 -> (类型标识, 中文标签, [(loader, 字段), ...])
+# 模型类型 -> (类型标识, 中文标签, role, [(loader, 字段), ...])
+#   role=main      生成主模型（可作为生成接口的 model 参数）
+#   role=component 工作流内部组件（VAE / 文本编码器 / LoRA，无需单独配置）
 _MODEL_TYPES = [
-    ("checkpoints", "图片底模 Checkpoints（文生图 / 图生图）",
+    ("checkpoints", "图片底模 Checkpoints（文生图 / 图生图）", "main",
      [("CheckpointLoaderSimple", "ckpt_name"),
       ("ImageOnlyCheckpointLoader", "ckpt_name")]),
-    ("diffusion_models", "扩散模型 Diffusion Models（视频 / 生成主模型）",
+    ("diffusion_models", "扩散模型 Diffusion Models（视频 / 生成主模型）", "main",
      [("UNETLoader", "unet_name")]),
-    ("text_encoders", "文本编码器 Text Encoders",
+    ("text_encoders", "文本编码器 Text Encoders", "component",
      [("CLIPLoader", "clip_name"), ("ClipProjLoader", "clip_name")]),
-    ("vae", "VAE 解码器",
+    ("vae", "VAE 解码器", "component",
      [("VAELoader", "vae_name")]),
-    ("loras", "LoRA 模型",
+    ("loras", "LoRA 模型", "component",
      [("LoraLoaderModelOnly", "lora_name")]),
 ]
 
@@ -352,26 +371,70 @@ def _template_uses_model(tpl: dict, model_id: str, loader: str, field: str) -> b
     return False
 
 
+# 模型类型 -> 磁盘子目录（本地文件健康校验用）
+_MODEL_SUBDIR = {
+    "checkpoints": "checkpoints",      # 兼容 sd-webui 的 Stable-diffusion
+    "diffusion_models": "diffusion_models",
+    "text_encoders": "text_encoders",
+    "vae": "vae",
+    "loras": "loras",
+}
+_HEADER_LEN_MAX = 16 * 1024 * 1024  # safetensors header 合理上限
+
+
+def _check_model_health(mtype: str, name: str) -> str:
+    """本地模型文件健康校验：读取 safetensors header 长度声明判断是否损坏。
+
+    返回 ok（可用）/ corrupt（损坏）/ missing（未找到文件）/ unknown（无法校验）。
+    """
+    if not getattr(settings, "comfy_models_dir", ""):
+        return "unknown"
+    subdirs = [_MODEL_SUBDIR.get(mtype, "")]
+    if mtype == "checkpoints":
+        subdirs = ["checkpoints", "Stable-diffusion"]
+    for base in settings.comfy_models_dir.split(";"):
+        base = base.strip()
+        if not base:
+            continue
+        for sd in subdirs:
+            p = Path(base) / sd / name
+            try:
+                if not (p.is_file() and p.stat().st_size > 0):
+                    continue
+                with open(p, "rb") as f:
+                    head = f.read(8)
+                if len(head) < 8:
+                    return "corrupt"
+                n = struct.unpack("<Q", head)[0]
+                return "ok" if 0 < n < _HEADER_LEN_MAX else "corrupt"
+            except OSError:
+                continue
+    return "unknown"
+
+
 def _build_model_registry(st) -> list[dict]:
     """汇总所有可达 ComfyUI 节点上的真实模型清单。
 
-    每个条目: {id, type, nodes, capabilities}
+    每个条目: {id, type, role, nodes, capabilities, health}
+    role: main（生成主模型）/ component（VAE·文本编码器·LoRA 等组件）
+    health: ok / corrupt / missing / unknown（本地文件校验）
     """
     nodes = getattr(st, "comfy_servers", {}) or {}
     infos = getattr(st, "object_infos", {}) or {}
     templates = getattr(st, "templates", []) or []
+    type_role = {t[0]: t[2] for t in _MODEL_TYPES}
     registry: dict[str, dict] = {}
 
     for name, srv in nodes.items():
         if not getattr(srv, "reachable", False):
             continue
         info = infos.get(name, {}) or {}
-        for mtype, _label, loaders in _MODEL_TYPES:
+        for mtype, _label, _role, loaders in _MODEL_TYPES:
             for loader, field in loaders:
                 for mid in _loader_options(info, loader, field):
                     entry = registry.setdefault(mid, {
-                        "id": mid, "type": mtype,
-                        "nodes": [], "capabilities": set(),
+                        "id": mid, "type": mtype, "role": type_role.get(mtype, "component"),
+                        "nodes": [], "capabilities": set(), "health": "",
                     })
                     if name not in entry["nodes"]:
                         entry["nodes"].append(name)
@@ -382,30 +445,46 @@ def _build_model_registry(st) -> list[dict]:
     out = []
     for e in registry.values():
         e["capabilities"] = sorted(e["capabilities"])
+        e["health"] = _check_model_health(e["type"], e["id"])
         out.append(e)
-    out.sort(key=lambda e: (e["type"], e["id"]))
+    # 主模型在前，healthy 在前
+    out.sort(key=lambda e: (e["role"] != "main", e["health"] != "ok", e["type"], e["id"]))
     return out
 
 
 @router.get("/models")
-async def models_list(request: Request):
-    """OpenAI 兼容模型列表（真实发现：来自 ComfyUI 节点的实际模型文件）。"""
+async def models_list(
+    request: Request,
+    role: str = "main",          # main(默认，仅生成主模型) | component | all
+    type: str | None = None,     # 按模型类型过滤: checkpoints / diffusion_models / ...
+    capability: str | None = None,  # 按能力过滤: txt2img / img2img / txt2video / img2video
+):
+    """OpenAI 兼容模型列表。
+
+    默认只返回生成主模型（图片 checkpoint + 视频 diffusion），
+    VAE / 文本编码器 / LoRA 等组件默认不列出（可通过 ?role=all 查看）。
+    """
     st = request.app.state
     registry = _build_model_registry(st)
-    return {
-        "object": "list",
-        "data": [
-            {
-                "id": e["id"],
-                "object": "model",
-                "created": 0,
-                "owned_by": e["nodes"][0] if e["nodes"] else "unknown",
-                "capabilities": e["capabilities"],
-                "type": e["type"],
-            }
-            for e in registry
-        ],
-    }
+    out = []
+    for e in registry:
+        if role != "all" and e["role"] != role:
+            continue
+        if type and e["type"] != type:
+            continue
+        if capability and capability not in e["capabilities"]:
+            continue
+        out.append({
+            "id": e["id"],
+            "object": "model",
+            "created": 0,
+            "owned_by": e["nodes"][0] if e["nodes"] else "unknown",
+            "capabilities": e["capabilities"],
+            "type": e["type"],
+            "role": e["role"],
+            "health": e["health"],
+        })
+    return {"object": "list", "data": out}
 
 
 @router.get("/models/discover")
@@ -415,7 +494,8 @@ async def models_discover(request: Request):
     nodes = getattr(st, "comfy_servers", {}) or {}
     registry = _build_model_registry(st)
 
-    by_type = {k: {"label": label, "models": []} for k, label, _ in _MODEL_TYPES}
+    by_type = {k: {"label": label, "role": role, "models": []}
+               for k, label, role, _ in _MODEL_TYPES}
     for e in registry:
         by_type[e["type"]]["models"].append(e)
 
@@ -446,7 +526,7 @@ async def model_detail(model_id: str, request: Request):
             return {
                 "id": e["id"], "object": "model", "created": 0,
                 "owned_by": e["nodes"], "capabilities": e["capabilities"],
-                "type": e["type"],
+                "type": e["type"], "role": e["role"], "health": e["health"],
             }
     raise HTTPException(404, f"模型不存在: {model_id}")
 

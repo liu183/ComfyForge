@@ -223,10 +223,14 @@ POST /v1/videos/generations        {"model":"MiniMax-H3","content":[{...}],"dura
 GET  /v1/videos/generations/{id}   {"id","status":"succeeded","content":{"url":...}}
 
 # 模型发现（OpenAI 兼容 + 详细分组）
-GET  /v1/models                   全部模型（data[] 含 capabilities/type/owned_by 节点）
+GET  /v1/models                   生成主模型列表（data[] 含 capabilities/type/role/health/节点）
 GET  /v1/models/discover          按类型 / 按能力分组，含节点来源与总数
 GET  /v1/models/{id}              单模型详情（模型 id 含反斜杠需 URL 编码）
 ```
+
+**模型分层与健康**：
+- `role=main` 才是**生成主模型**（图片 checkpoint / 视频 diffusion），默认 `/v1/models` 只返回这些；VAE / 文本编码器 / LoRA 是 `role=component`，工作流自动使用，无需单独配置（`?role=all` 可查看）
+- `health` 字段标识文件是否完好：`ok` / `corrupt` / `unknown`（基于 safetensors 文件头校验）。损坏模型不会被 `model` 参数选用（自动回退默认底模）
 
 **参数归一**（消费侧传主流参数，网关自动转内部模板参数）：
 
