@@ -305,13 +305,148 @@ def videos_generation_status(task_id: str, request: Request):
 
 
 # ---------------------------------------------------------------------------
-# OpenAI 风格模型列表
+# 模型发现（OpenAI 风格 + 详细分组）
 # ---------------------------------------------------------------------------
+# 模型类型 -> (类型标识, 中文标签, [(loader, 字段), ...])
+_MODEL_TYPES = [
+    ("checkpoints", "图片底模 Checkpoints（文生图 / 图生图）",
+     [("CheckpointLoaderSimple", "ckpt_name"),
+      ("ImageOnlyCheckpointLoader", "ckpt_name")]),
+    ("diffusion_models", "扩散模型 Diffusion Models（视频 / 生成主模型）",
+     [("UNETLoader", "unet_name")]),
+    ("text_encoders", "文本编码器 Text Encoders",
+     [("CLIPLoader", "clip_name"), ("ClipProjLoader", "clip_name")]),
+    ("vae", "VAE 解码器",
+     [("VAELoader", "vae_name")]),
+    ("loras", "LoRA 模型",
+     [("LoraLoaderModelOnly", "lora_name")]),
+]
+
+
+def _loader_options(object_info: dict | None, loader: str, field: str) -> list[str]:
+    """从 object_info 提取某 loader 字段的可选模型列表。"""
+    node = (object_info or {}).get(loader, {})
+    spec = node.get("input", {}).get("required", {}).get(field)
+    if isinstance(spec, list) and len(spec) >= 1:
+        options = spec[0]
+        if isinstance(options, list):
+            if options and isinstance(options[0], (list, tuple)):
+                options = options[0]
+            return [str(o) for o in options]
+    return []
+
+
+def _template_uses_model(tpl: dict, model_id: str, loader: str, field: str) -> bool:
+    """判断模型是否被某模板（能力）引用：options_source 或 requires_models 命中。"""
+    for p in tpl.get("params", []):
+        src = p.get("options_source")
+        if src and src.get("loader") == loader and src.get("field") == field:
+            return True
+    for b in tpl.get("backends", {}).values():
+        for req in b.get("requires_models", []):
+            if req.get("loader") == loader and req.get("field") == field:
+                m = req.get("match", [])
+                if m and not any(k.lower() in model_id.lower() for k in m):
+                    continue
+                return True
+    return False
+
+
+def _build_model_registry(st) -> list[dict]:
+    """汇总所有可达 ComfyUI 节点上的真实模型清单。
+
+    每个条目: {id, type, nodes, capabilities}
+    """
+    nodes = getattr(st, "comfy_servers", {}) or {}
+    infos = getattr(st, "object_infos", {}) or {}
+    templates = getattr(st, "templates", []) or []
+    registry: dict[str, dict] = {}
+
+    for name, srv in nodes.items():
+        if not getattr(srv, "reachable", False):
+            continue
+        info = infos.get(name, {}) or {}
+        for mtype, _label, loaders in _MODEL_TYPES:
+            for loader, field in loaders:
+                for mid in _loader_options(info, loader, field):
+                    entry = registry.setdefault(mid, {
+                        "id": mid, "type": mtype,
+                        "nodes": [], "capabilities": set(),
+                    })
+                    if name not in entry["nodes"]:
+                        entry["nodes"].append(name)
+                    for tpl in templates:
+                        if _template_uses_model(tpl, mid, loader, field):
+                            entry["capabilities"].add(tpl["type"])
+
+    out = []
+    for e in registry.values():
+        e["capabilities"] = sorted(e["capabilities"])
+        out.append(e)
+    out.sort(key=lambda e: (e["type"], e["id"]))
+    return out
+
+
 @router.get("/models")
 async def models_list(request: Request):
+    """OpenAI 兼容模型列表（真实发现：来自 ComfyUI 节点的实际模型文件）。"""
     st = request.app.state
-    out = []
-    for cap in st.templates:
-        out.append({"id": cap["type"], "object": "model", "created": 0, "owned_by": "comfyforge"})
-    return {"object": "list", "data": out}
+    registry = _build_model_registry(st)
+    return {
+        "object": "list",
+        "data": [
+            {
+                "id": e["id"],
+                "object": "model",
+                "created": 0,
+                "owned_by": e["nodes"][0] if e["nodes"] else "unknown",
+                "capabilities": e["capabilities"],
+                "type": e["type"],
+            }
+            for e in registry
+        ],
+    }
+
+
+@router.get("/models/discover")
+async def models_discover(request: Request):
+    """详细模型发现：按类型 / 按能力分组，含节点来源与模型总数。"""
+    st = request.app.state
+    nodes = getattr(st, "comfy_servers", {}) or {}
+    registry = _build_model_registry(st)
+
+    by_type = {k: {"label": label, "models": []} for k, label, _ in _MODEL_TYPES}
+    for e in registry:
+        by_type[e["type"]]["models"].append(e)
+
+    caps = {}
+    for tpl in st.templates:
+        caps[tpl["type"]] = {
+            "label": tpl.get("label", tpl["type"]),
+            "models": [e["id"] for e in registry if tpl["type"] in e["capabilities"]],
+        }
+
+    return {
+        "total": len(registry),
+        "nodes": [
+            {"name": n, "reachable": s.reachable, "url": s.base_url}
+            for n, s in nodes.items()
+        ],
+        "types": by_type,
+        "capabilities": caps,
+    }
+
+
+@router.get("/models/{model_id}")
+async def model_detail(model_id: str, request: Request):
+    """OpenAI 风格单模型查询（模型 id 含反斜杠时请 URL 编码）。"""
+    registry = _build_model_registry(request.app.state)
+    for e in registry:
+        if e["id"] == model_id:
+            return {
+                "id": e["id"], "object": "model", "created": 0,
+                "owned_by": e["nodes"], "capabilities": e["capabilities"],
+                "type": e["type"],
+            }
+    raise HTTPException(404, f"模型不存在: {model_id}")
 

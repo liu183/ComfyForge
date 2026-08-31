@@ -222,8 +222,10 @@ POST /v1/images/edits              multipart: image + prompt + size（图生图�
 POST /v1/videos/generations        {"model":"MiniMax-H3","content":[{...}],"duration"/"frames","ratio","resolution","seed"}
 GET  /v1/videos/generations/{id}   {"id","status":"succeeded","content":{"url":...}}
 
-# OpenAI 风格模型列表
-GET  /v1/models
+# 模型发现（OpenAI 兼容 + 详细分组）
+GET  /v1/models                   全部模型（data[] 含 capabilities/type/owned_by 节点）
+GET  /v1/models/discover          按类型 / 按能力分组，含节点来源与总数
+GET  /v1/models/{id}              单模型详情（模型 id 含反斜杠需 URL 编码）
 ```
 
 **参数归一**（消费侧传主流参数，网关自动转内部模板参数）：
